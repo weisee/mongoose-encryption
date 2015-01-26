@@ -23,6 +23,7 @@
   "homepage": "https://github.com/cinch-financial/mongoose-encryption",
   "license": "MIT",
   "dependencies": {
+    "async": "0.9.x",
     "dotty": "0.0.2",
     "underscore": "1.5.x"
   },
