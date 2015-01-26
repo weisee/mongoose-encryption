@@ -4,8 +4,8 @@ chai = require 'chai'
 assert = chai.assert
 mongoose.connect 'mongodb://localhost/mongoose-encryption-test'
 
-encryptionKey = 'CwBDwGUwoM5YzBmzwWPSI+KjBKvWHaablbrEiDYh43Q='
-simpleKey = 'CwBDwGUwoM5YzBmzwWPSI+KjBKvWHaablbrEiDYh43Q='
+sKey = 'CwBDwGUwoM5YzBmzwWPSI+KjBKvWHaablbrEiDYh43Q='
+aKey = 'CwBDwGUwoM5YzBmzwWPSI+KjBKvWHaablbrEiDYh43Q='
 
 encrypt = require '../index.js'
 
@@ -13,21 +13,25 @@ BasicEncryptedModel = null
 
 before ->
   BasicEncryptedModelSchema = mongoose.Schema
-    findableText: type: String, encrypt: true
-    findableInt: type: Number, encrypt: 'aggregated'
-    text: type: String
-    bool: type: Boolean
-    num: type: Number
-    date: type: Date
-    id2: type: mongoose.Schema.Types.ObjectId
-    arr: [ type: String ]
-    mix: type: mongoose.Schema.Types.Mixed
-    buf: type: Buffer
-    idx: type: String, index: true
+    # findableText: type: String, encrypt: true
+    # findableInt: type: Number, encrypt: true
+    text: type: String, encrypt: 'aggregated'
+    bool: type: Boolean, encrypt: 'aggregated'
+    num: type: Number, encrypt: 'aggregated'
+    date: type: Date, encrypt: 'aggregated'
+    id2: type: mongoose.Schema.Types.ObjectId, encrypt: 'aggregated'
+    arr: [ type: String , encrypt: 'aggregated']
+    mix: type: mongoose.Schema.Types.Mixed, encrypt: 'aggregated'
+    buf: type: Buffer, encrypt: 'aggregated'
+    idx: type: String, index: true, encrypt: 'aggregated'
 
   BasicEncryptedModelSchema.plugin encrypt, {
-    key: encryptionKey
-    simpleKey: simpleKey
+    separated: {
+      key: sKey
+    },
+    aggregated: {
+      key: aKey
+    },
   }
 
   BasicEncryptedModel = mongoose.model 'Simple', BasicEncryptedModelSchema
@@ -50,8 +54,8 @@ describe 'encrypt plugin', ->
 describe 'new EncryptedModel', ->
   it 'should remain unaltered', (done) ->
     simpleTestDoc1 = new BasicEncryptedModel
-      findableText: 'Magazine from tagazine'
-      findableInt: 1337
+      # findableText: 'Magazine from tagazine'
+      # findableInt: 1337
 
       text: 'Unencrypted text'
       bool: true
@@ -62,8 +66,8 @@ describe 'new EncryptedModel', ->
       mix: { str: 'A string', bool: false }
       buf: new Buffer 'abcdefg',
 
-    assert.propertyVal simpleTestDoc1, 'findableText', 'Magazine from tagazine'
-    assert.propertyVal simpleTestDoc1, 'findableInt', 1337
+    # assert.propertyVal simpleTestDoc1, 'findableText', 'Magazine from tagazine'
+    # assert.propertyVal simpleTestDoc1, 'findableInt', 1337
 
     assert.propertyVal simpleTestDoc1, 'text', 'Unencrypted text'
     assert.propertyVal simpleTestDoc1, 'bool', true
@@ -92,8 +96,8 @@ describe 'document.save()', ->
     BasicEncryptedModel.prototype.decryptSync.reset()
 
     @simpleTestDoc2 = new BasicEncryptedModel
-      findableText: 'Magazine from tagazine'
-      findableInt: 1337
+      # findableText: 'Magazine from tagazine'
+      # findableInt: 1337
 
       text: 'Unencrypted text'
       bool: true
@@ -116,9 +120,10 @@ describe 'document.save()', ->
   it 'saves encrypted fields', (done) ->
     BasicEncryptedModel.find().where(
       _id: @simpleTestDoc2._id
-      findableText: $exists: true
-      findableInt: $exists: true
       _ct: $exists: true
+      # _co: $exists: true
+      findableText: $exists: false
+      findableInt: $exists: false
       text: $exists: false
       bool: $exists: false
       num: $exists: false
@@ -131,25 +136,25 @@ describe 'document.save()', ->
       assert.lengthOf docs, 1
       done err
 
-  it 'returns decrypted data after save', (done) ->
-    @simpleTestDoc2.save (err, doc) ->
-      assert.equal doc.findableText, 'Magazine from tagazine'
-      assert.equal doc.findableInt, 1337
+  # it 'returns decrypted data after save', (done) ->
+  #   @simpleTestDoc2.save (err, doc) ->
+  #     assert.equal doc.findableText, 'Magazine from tagazine'
+  #     assert.equal doc.findableInt, 1337
 
-      assert.equal doc.text, 'Unencrypted text'
-      assert.equal doc.bool, true
-      assert.equal doc.num, 42
-      assert.deepEqual doc.date, new Date('2014-05-19T16:39:07.536Z')
-      assert.equal doc.id2, '5303e65d34e1e80d7a7ce212'
-      assert.equal doc.arr.toString(), ['alpha', 'bravo'].toString()
-      assert.deepEqual doc.mix, { str: 'A string', bool: false }
-      assert.deepEqual doc.buf, new Buffer 'abcdefg'
-      done err
+  #     assert.equal doc.text, 'Unencrypted text'
+  #     assert.equal doc.bool, true
+  #     assert.equal doc.num, 42
+  #     assert.deepEqual doc.date, new Date('2014-05-19T16:39:07.536Z')
+  #     assert.equal doc.id2, '5303e65d34e1e80d7a7ce212'
+  #     assert.equal doc.arr.toString(), ['alpha', 'bravo'].toString()
+  #     assert.deepEqual doc.mix, { str: 'A string', bool: false }
+  #     assert.deepEqual doc.buf, new Buffer 'abcdefg'
+  #     done err
 
-   it 'should have called encrypt then decrypt', ->
-    assert.equal @simpleTestDoc2.encrypt.callCount, 1
-    assert.equal @simpleTestDoc2.decryptSync.callCount, 1
-    assert @simpleTestDoc2.encrypt.calledBefore @simpleTestDoc2.decryptSync
+  #  it 'should have called encrypt then decrypt', ->
+  #   assert.equal @simpleTestDoc2.encrypt.callCount, 1
+  #   assert.equal @simpleTestDoc2.decryptSync.callCount, 1
+  #   assert @simpleTestDoc2.encrypt.calledBefore @simpleTestDoc2.decryptSync
 
 # describe 'document.save() when only certain fields are encrypted', ->
 #   before ->

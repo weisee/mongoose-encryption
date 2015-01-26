@@ -5,56 +5,251 @@
   var dotty = require('dotty');
   var async = require('async');
 
-  var ALGORITHM = 'aes-256-cbc';
-  var SIMPLE_ALGORITHM = 'rc4';
+  var AGGREGATED_ALGORITHM = 'aes-256-cbc';
   var IV_LENGTH = 16;
+  var SEPARETED_ALGORITHM = 'rc4';
 
   var isEmbeddedDocument = function(doc) {
     return doc.constructor.name === 'EmbeddedDocument';
   };
 
+  var getSEncryptFn = function (key) {
+    return function(value, done) {
+      var cipher = crypto.createCipher(SEPARETED_ALGORITHM, key);
+      cipher.end(JSON.stringify(value), 'utf8', function() {
+        done(null, cipher.read());
+      });
+    };
+  }
+
+  var getSDecryptFn = function (key) {
+    return function(cipher) {
+      var decipher = crypto.createDecipher(SEPARETED_ALGORITHM, new Buffer(key));
+      var decryptedObjJSON = decipher.update(new Buffer(cipher, 'base64'), undefined, 'utf8') + decipher.final('utf8');
+      try {
+        return JSON.parse(decryptedObjJSON);
+      } catch (err) {
+        throw new Error('Error parsing JSON during separated decrypt: ' + err);
+      }
+    };
+  }
+
+  var getAEncryptFn = function (key) {
+    return function(value, done) {
+      crypto.randomBytes(IV_LENGTH, function(err, iv) {
+          if (err) {return done(err); }
+
+          var cipher = crypto.createCipheriv(AGGREGATED_ALGORITHM, key, iv);
+          cipher.end(JSON.stringify(value), 'utf8', function() {
+            var encryptedData = Buffer.concat([iv, cipher.read()]);
+            done(null, encryptedData);
+          });
+      });
+    };
+  }
+
+  var getADecryptFn = function (key) {
+    return function (encryptedData) {
+      var encryptedDataWithIV = encryptedData.buffer || encryptedData;
+      var iv = encryptedDataWithIV.slice(0, IV_LENGTH);
+      var encryptedData = encryptedDataWithIV.slice(IV_LENGTH, encryptedDataWithIV.length);
+      var decipher = crypto.createDecipheriv(AGGREGATED_ALGORITHM, key, iv);
+
+      var decryptedObjJSON = decipher.update(encryptedData, undefined, 'utf8') + decipher.final('utf8');
+      try {
+        return JSON.parse(decryptedObjJSON);
+      } catch (err) {
+        throw new Error('Error parsing JSON during aggregation decrypt: ' + err);
+      }
+    }
+  }
+
+  // var encryptSeparatedField = function(fieldName, done) {
+  //   var that = this;
+  //   var fieldValue = that[fieldName];
+  //   if (fieldValue === undefined) {return done(null); }
+
+  //   _separetedEncrypt(JSON.stringify(fieldValue), function(err, encryptedFieldValue) {
+  //     if (err) {return done(err);}
+  //     console.log('MODEL pre', that[fieldName], encryptedFieldValue.toString('base64'))
+  //     that[fieldName] = encryptedFieldValue.toString('base64');
+  //     console.log('MODEL post', that[fieldName])
+  //     done(null);
+  //   });
+  // };
+
+
   module.exports = function(schema, options) {
 
-    var details, separateEncryptedFields, encryptedFields, excludedFields;
+    // Preparation
 
-    if (!options.key)
-      throw new Error('options.key is required as a 32 byte base64 string');
-    if (!options.simpleKey)
-      throw new Error('options.simpleKey is required as a base64 string');
+    //
+    // Separated encryption (SE)
+    //
 
-    var key = new Buffer(options.key, 'base64');
-    var simpleKey = new Buffer(options.simpleKey, 'base64');
+    var optionsSE = options.separated
 
-    if (!schema.paths._ct)
-      schema.add({
-        _ct: {
-          type: Buffer
-        }
-      });
-
-    if (options.fields)
-      encryptedFields = _.difference(options.fields, ['_ct']);
-    else {
-      excludedFields = _.union(['_id', '_ct'], options.exclude);
-      encryptedFields = [];
-      for (var path in schema.paths) {
-        details = schema.paths[path];
-        if (excludedFields.indexOf(path) < 0 && !details._index) {
-          encryptedFields.push(path);
-        }
-      }
+    if (!optionsSE.key) {
+      throw new Error('options.separated.key is required as a base64 string');
     }
 
-    // fill separate encrypted fields arr
-    separateEncryptedFields = [];
+    var keySE = new Buffer(optionsSE.key, 'base64');
+    var fieldsSE = [];
+
+
+    //
+    // Aggregated encryption (AE)
+    //
+
+    var optionsAE = options.aggregated
+
+    if (!optionsAE.key) {
+      throw new Error('options.aggregated.key is required as a 32 byte base64 string');
+    }
+
+    var keyAE = new Buffer(optionsAE.key, 'base64');
+    var fieldsAE = [];
+
+    // Add cypher text path to schema
+    if (!schema.paths._ct) {
+      schema.add({ _ct: {type: Buffer}});
+    }
+
+    // Analyze schema and fill SE and AE field arrays
+
     for (var path in schema.paths) {
-      details = schema.paths[path];
-      if (details.options.encrypt) {
-        separateEncryptedFields.push(path);
+      var details = schema.paths[path];
+      // If indexed field - encryption impossible
+      var encrypt = details.options.encrypt;
+      if (typeof details.options.type[0] === 'object') {
+        encrypt = details.options.type[0].encrypt;
+      }
+      if (!details._index && encrypt) {
+        (encrypt === 'aggregated') ? fieldsAE.push(path) : fieldsSE.push(path);
       }
     }
-    // TODO: make optimization of arrays filling
-    encryptedFields = _.difference(encryptedFields, separateEncryptedFields);
+
+
+    // Extend scheme methods
+
+    schema.methods.encrypt = function(done) {
+      var doc = this;
+      var encrypts = [];
+      if (fieldsSE.length) {
+        encrypts.push(doc.encryptSE.bind(doc));
+      }
+      if (fieldsAE.length) {
+        encrypts.push(doc.encryptAE.bind(doc));
+      }
+      async.parallel(encrypts, function(err, result) {
+        done(err);
+      });
+    };
+
+    schema.methods.decrypt = function(done) { // callback style but actually synchronous to allow for decryptSync without copypasta or complication
+      try {
+        schema.methods.decryptSync.call(this);
+      } catch(e){
+        return done(e);
+      }
+      done();
+    };
+
+    schema.methods.decryptSync = function() {
+      var doc = this;
+      if (doc._co) {
+        schema.methods.decryptSE.call(doc);
+        doc._co = undefined;
+      }
+      if (doc._ct) {
+        schema.methods.decryptAE.call(doc);
+        doc._ct = undefined;
+      }
+      return doc;
+    };
+
+
+    // Extend scheme if exists SE fields
+    if (fieldsSE.length) {
+
+      // Add cypher object path to schema
+      if (!schema.paths._co) {
+        schema.add({ _co: {type: 'Mixed'}});
+      }
+
+      var encryptSE = getSEncryptFn(keySE);
+
+      // Add encrypt method for SE
+      schema.methods.encryptSE = function (done) {
+        var doc = this;
+        async.each(fieldsSE, function (fieldName, cb) {
+          var val = doc[fieldName];
+          if (val === undefined) { return cb(null); }
+          encryptSE(val, function (err, encryptedValue) {
+            if (err) { return cb(err); }
+            doc[fieldName] = undefined;
+            doc._co[fieldName] = encryptedValue;
+            cb(null);
+          })
+        }, done);
+      }
+
+      var decryptSE = getSDecryptFn(keySE);
+
+      // Add decrypt method for SE, should be synchronous
+      schema.methods.decryptSE = function () {
+        var doc = this;
+        var cipherObj = doc._co;
+        for (var field in cipherObj) {
+          doc[field] = decryptSE(cipherObj[field]);
+        }
+      }
+    }
+
+    // Extend scheme if exists AE fields
+    if (fieldsAE.length) {
+
+      // Add cypher text path to schema
+      if (!schema.paths._ct) {
+        schema.add({ _ct: {type: Buffer}});
+      }
+
+      var encryptAE = getAEncryptFn(keyAE);
+
+      // Add encrypt method for AE
+      schema.methods.encryptAE = function (done) {
+        var doc = this;
+        var objectToEncrypt = {};
+        _.each(fieldsAE, function (fieldName) {
+          var val = doc[fieldName];
+          if (val !== undefined) {
+            objectToEncrypt[fieldName] = val;
+            doc[fieldName] = undefined;
+          }
+        })
+        encryptAE(objectToEncrypt, function (err, encryptedData) {
+          if (err) { return done(err); }
+          doc._ct = encryptedData;
+          done(null);
+        })
+      }
+
+      var decryptAE = getADecryptFn(keyAE);
+
+      // Add decrypt method for AE, should be synchronous
+      schema.methods.decryptAE = function () {
+        var doc = this;
+
+        var decryptedObject = decryptAE(doc._ct);
+        for (var field in decryptedObject) {
+          doc[field] = decryptedObject[field];
+        }
+      }
+
+    }
+
+
+    // Add hooks
 
     schema.pre('init', function(next, data) {
       if (isEmbeddedDocument(this)) {
@@ -103,121 +298,6 @@
       return doc;
     });
 
-
-    var _lightEncrypt = function(value, done) {
-      var cipher = crypto.createCipher(SIMPLE_ALGORITHM, simpleKey);
-      cipher.end(value, 'utf8', function() {
-        done(null, cipher.read());
-      });
-    };
-
-    var _hardEncrypt = function(value, done) {
-      crypto.randomBytes(IV_LENGTH, function(err, iv) {
-          if (err) {return done(err); }
-
-          var cipher = crypto.createCipheriv(ALGORITHM, key, iv);
-          cipher.end(value, 'utf8', function() {
-            done(null, cipher.read(), iv);
-          });
-      });
-
-    };
-
-    var encryptSeparatedField = function(fieldName, done) {
-      var that = this;
-      var fieldValue = that[fieldName];
-      if (fieldValue === undefined) {return done(null); }
-
-      _lightEncrypt(JSON.stringify(fieldValue), function(err, encryptedFieldValue) {
-        if (err) {return done(err);}
-        console.log('MODEL pre', that[fieldName], encryptedFieldValue.toString('base64'))
-        that[fieldName] = encryptedFieldValue.toString('base64');
-        console.log('MODEL post', that[fieldName])
-        done(null);
-      });
-    };
-
-    var decryptSeparatedValue = function(value) {
-      var decipher, decryptedObjectJSON, decryptedObject;
-      // console.log('DECRYPT', value)
-      if (typeof value !== 'string') { return value; }
-      decipher = crypto.createDecipher(SIMPLE_ALGORITHM, new Buffer(simpleKey));
-      decryptedObjectJSON = decipher.update(new Buffer(value, 'base64'), undefined, 'utf8') + decipher.final('utf8');
-      try {
-        return JSON.parse(decryptedObjectJSON);
-      } catch (err) {
-        throw new Error('Error parsing JSON during decrypt: ' + err);
-      }
-    };
-
-    schema.methods.encrypt = function(done) {
-      var that = this;
-      async.parallel({
-        encrypt: function (cb) {
-          var field, val;
-          var objectToEncrypt = _.pick(that, encryptedFields);
-          for (field in objectToEncrypt) {
-            val = objectToEncrypt[field];
-            if (val === undefined) {
-              delete objectToEncrypt[field];
-            } else {
-              that[field] = undefined;
-            }
-          }
-          _hardEncrypt(JSON.stringify(objectToEncrypt), function (err, encryptedData, iv) {
-            if (err) {return cb(err);}
-            that._ct = Buffer.concat([iv, encryptedData]);
-            cb(null);
-          });
-        },
-        encryptSeparated: function (cb) {
-          async.each(separateEncryptedFields, encryptSeparatedField.bind(that), cb);
-        },
-      }, function(err, result) {
-        done(err);
-      });
-    };
-
-    schema.methods.decrypt = function(cb) { // callback style but actually synchronous to allow for decryptSync without copypasta or complication
-      try {
-        schema.methods.decryptSync.call(this);
-      } catch(e){
-        return cb(e);
-      }
-      cb();
-    };
-
-
-    schema.methods.decryptSync = function() {
-      var ct, ctWithIV, decipher, iv, decryptedObjectJSON, decryptedObject;
-      if (this._ct) {
-        ctWithIV = this._ct.buffer || this._ct;
-        iv = ctWithIV.slice(0, IV_LENGTH);
-        ct = ctWithIV.slice(IV_LENGTH, ctWithIV.length);
-        decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
-        decryptedObjectJSON = decipher.update(ct, undefined, 'utf8') + decipher.final('utf8');
-        try {
-          decryptedObject = JSON.parse(decryptedObjectJSON);
-        } catch (err) {
-          if (this._id)
-            idString = this._id.toString();
-          else
-            idString = 'unknown';
-          throw new Error('Error parsing JSON during decrypt of ' + idString + ': ' + err);
-        }
-        for (var field in decryptedObject) {
-          decipheredVal = decryptedObject[field];
-          this[field] = decipheredVal;
-        }
-        var that = this;
-        _.each(separateEncryptedFields, function(fieldName) {
-          that[fieldName] = decryptSeparatedValue(that[fieldName]);
-        });
-        this._ct = undefined;
-      }
-
-
-    };
   };
 
   // applied to schemas that contain encrypted embedded documents
