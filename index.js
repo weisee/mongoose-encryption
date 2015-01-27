@@ -13,11 +13,19 @@
     return doc.constructor.name === 'EmbeddedDocument';
   };
 
+
+  var getSEncryptSyncFn = function (key) {
+    return function(value) {
+      var cipher = crypto.createCipher(SEPARETED_ALGORITHM, key)
+      return cipher.update(JSON.stringify(value), undefined, 'base64') + cipher.final('base64');
+    };
+  }
+
   var getSEncryptFn = function (key) {
     return function(value, done) {
       var cipher = crypto.createCipher(SEPARETED_ALGORITHM, key);
       cipher.end(JSON.stringify(value), 'utf8', function() {
-        done(null, cipher.read());
+        done(null, cipher.read().toString('base64'));
       });
     };
   }
@@ -64,20 +72,6 @@
     }
   }
 
-  // var encryptSeparatedField = function(fieldName, done) {
-  //   var that = this;
-  //   var fieldValue = that[fieldName];
-  //   if (fieldValue === undefined) {return done(null); }
-
-  //   _separetedEncrypt(JSON.stringify(fieldValue), function(err, encryptedFieldValue) {
-  //     if (err) {return done(err);}
-  //     console.log('MODEL pre', that[fieldName], encryptedFieldValue.toString('base64'))
-  //     that[fieldName] = encryptedFieldValue.toString('base64');
-  //     console.log('MODEL post', that[fieldName])
-  //     done(null);
-  //   });
-  // };
-
 
   module.exports = function(schema, options) {
 
@@ -87,7 +81,8 @@
     // Separated encryption (SE)
     //
 
-    var optionsSE = options.separated
+    var optionsSE = options.separated || {key: 'CwBDwGUwoM5YzBmzwWPSI+KjBKvWHaablbrEiDYh43Q='}
+
 
     if (!optionsSE.key) {
       throw new Error('options.separated.key is required as a base64 string');
@@ -101,7 +96,7 @@
     // Aggregated encryption (AE)
     //
 
-    var optionsAE = options.aggregated
+    var optionsAE = options.aggregated || {key: 'CwBDwGUwoM5YzBmzwWPSI+KjBKvWHaablbrEiDYh43Q='}
 
     if (!optionsAE.key) {
       throw new Error('options.aggregated.key is required as a 32 byte base64 string');
@@ -182,6 +177,7 @@
       // Add encrypt method for SE
       schema.methods.encryptSE = function (done) {
         var doc = this;
+        doc._co = {};
         async.each(fieldsSE, function (fieldName, cb) {
           var val = doc[fieldName];
           if (val === undefined) { return cb(null); }
@@ -204,6 +200,40 @@
           doc[field] = decryptSE(cipherObj[field]);
         }
       }
+
+      // Add statics
+
+      schema.statics.encrypt = getSEncryptSyncFn(keySE);
+      schema.statics.encryptAsync = encryptSE;
+
+      // Simplified model find, allow only simple compare for ciphered fields
+
+      schema.statics.encriptCondition = function (conditions) {
+        conditions._co = {};
+        for (var path in conditions) {
+          if (fieldsSE.indexOf(path) !== -1) {
+            conditions._co[path] = schema.statics.encrypt(conditions[path]);
+            delete conditions[path];
+          }
+        }
+        return conditions;
+      }
+
+      schema.statics.findCrypted = function (conditions, callback) {
+        if ('object' !== typeof conditions) {
+          return this.find.apply(this, arguments);
+        }
+        var _co = {}
+        for (var path in conditions) {
+          if (fieldsSE.indexOf(path) !== -1) {
+            _co[path] = schema.statics.encrypt(conditions[path]);
+            delete conditions[path];
+          }
+        }
+        conditions._co = _co;
+        return this.find(conditions, callback);
+      }
+
     }
 
     // Extend scheme if exists AE fields
@@ -287,7 +317,7 @@
     };
 
     schema.post('save', function(doc) {
-      if (_.isFunction(doc.decryptSync)) doc.decryptSync();
+      if (_.isFunction(doc.decryptSync)) { doc.decryptSync(); }
 
       // Until 3.8.6, Mongoose didn't trigger post save hook on EmbeddedDocuments,
       // instead had to call decrypt on all subDocs.
@@ -297,6 +327,9 @@
 
       return doc;
     });
+
+
+
 
   };
 

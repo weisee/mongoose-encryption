@@ -11,10 +11,15 @@ encrypt = require '../index.js'
 
 BasicEncryptedModel = null
 
+encryptPluginOptions = {
+  separated: key: sKey
+  aggregated: key: aKey
+}
+
 before ->
   BasicEncryptedModelSchema = mongoose.Schema
-    # findableText: type: String, encrypt: true
-    # findableInt: type: Number, encrypt: true
+    findableText: type: String, encrypt: true
+    findableInt: type: Number, encrypt: true
     text: type: String, encrypt: 'aggregated'
     bool: type: Boolean, encrypt: 'aggregated'
     num: type: Number, encrypt: 'aggregated'
@@ -25,37 +30,35 @@ before ->
     buf: type: Buffer, encrypt: 'aggregated'
     idx: type: String, index: true, encrypt: 'aggregated'
 
-  BasicEncryptedModelSchema.plugin encrypt, {
-    separated: {
-      key: sKey
-    },
-    aggregated: {
-      key: aKey
-    },
-  }
+  BasicEncryptedModelSchema.plugin encrypt, encryptPluginOptions
 
   BasicEncryptedModel = mongoose.model 'Simple', BasicEncryptedModelSchema
 
 describe 'encrypt plugin', ->
-  # it 'should add field _ct of type Buffer to the schema', ->
-  #   encryptedSchema = mongoose.Schema({}).plugin(encrypt, key: encryptionKey)
-  #   assert.property encryptedSchema.paths, '_ct'
-  #   assert.propertyVal encryptedSchema.paths._ct, 'instance', 'Buffer'
+  it 'should add field _ct of type Buffer to the schema', ->
+    encryptedSchema = mongoose.Schema({}).plugin encrypt, encryptPluginOptions
+    assert.property encryptedSchema.paths, '_ct'
+    assert.propertyVal encryptedSchema.paths._ct, 'instance', 'Buffer'
 
-  # it 'should expose an encrypt method on documents', ->
-  #   EncryptFnTestModel = mongoose.model 'EncryptFnTest', mongoose.Schema({}).plugin(encrypt, key: encryptionKey)
-  #   assert.isFunction (new EncryptFnTestModel).encrypt
+  it 'should add field _co of type Mixed to the schema', ->
+    encryptedSchema = mongoose.Schema({findableInt: type: Number, encrypt: true}).plugin encrypt, encryptPluginOptions
+    assert.property encryptedSchema.paths, '_co'
+    assert.propertyVal encryptedSchema.paths._co.options, 'type', 'Mixed'
 
-  # it 'should expose a decrypt method on documents', ->
-  #   DecryptFnTestModel = mongoose.model 'DecryptFnTest', mongoose.Schema({}).plugin(encrypt, key: encryptionKey)
-  #   assert.isFunction (new DecryptFnTestModel).decrypt
+  it 'should expose an encrypt method on documents', ->
+    EncryptFnTestModel = mongoose.model 'EncryptFnTest', mongoose.Schema({}).plugin(encrypt, encryptPluginOptions)
+    assert.isFunction (new EncryptFnTestModel).encrypt
+
+  it 'should expose a decrypt method on documents', ->
+    DecryptFnTestModel = mongoose.model 'DecryptFnTest', mongoose.Schema({}).plugin(encrypt, encryptPluginOptions)
+    assert.isFunction (new DecryptFnTestModel).decrypt
 
 
 describe 'new EncryptedModel', ->
   it 'should remain unaltered', (done) ->
     simpleTestDoc1 = new BasicEncryptedModel
-      # findableText: 'Magazine from tagazine'
-      # findableInt: 1337
+      findableText: 'Magazine from tagazine'
+      findableInt: 1337
 
       text: 'Unencrypted text'
       bool: true
@@ -66,8 +69,8 @@ describe 'new EncryptedModel', ->
       mix: { str: 'A string', bool: false }
       buf: new Buffer 'abcdefg',
 
-    # assert.propertyVal simpleTestDoc1, 'findableText', 'Magazine from tagazine'
-    # assert.propertyVal simpleTestDoc1, 'findableInt', 1337
+    assert.propertyVal simpleTestDoc1, 'findableText', 'Magazine from tagazine'
+    assert.propertyVal simpleTestDoc1, 'findableInt', 1337
 
     assert.propertyVal simpleTestDoc1, 'text', 'Unencrypted text'
     assert.propertyVal simpleTestDoc1, 'bool', true
@@ -86,18 +89,20 @@ describe 'new EncryptedModel', ->
     assert.notProperty simpleTestDoc1, '_ct'
     done()
 
-describe 'document.save()', ->
-  before ->
-    sinon.spy BasicEncryptedModel.prototype, 'encrypt'
-    sinon.spy BasicEncryptedModel.prototype, 'decryptSync'
+describe 'Model.encrypt', ->
+  it 'should equal encrypt sync and async', (done) ->
+    testValue = 'Hello world'
+    encryptedSync = BasicEncryptedModel.encrypt(testValue)
+    BasicEncryptedModel.encryptAsync testValue, (err, encryptedAsync) ->
+      return done err if err
+      assert.equal encryptedSync, encryptedAsync
+      done null
 
-  beforeEach (done) ->
-    BasicEncryptedModel.prototype.encrypt.reset()
-    BasicEncryptedModel.prototype.decryptSync.reset()
-
-    @simpleTestDoc2 = new BasicEncryptedModel
-      # findableText: 'Magazine from tagazine'
-      # findableInt: 1337
+describe 'Model.find', ->
+  before (done) ->
+    @simpleTestDoc = new BasicEncryptedModel
+      findableText: 'Magazine from tagazine'
+      findableInt: 1337
 
       text: 'Unencrypted text'
       bool: true
@@ -108,33 +113,83 @@ describe 'document.save()', ->
       mix: { str: 'A string', bool: false }
       buf: new Buffer 'abcdefg'
 
-    @simpleTestDoc2.save (err) ->
+    @simpleTestDoc.save (err) ->
       assert.equal err, null
       done()
+
+  after (done) ->
+    @simpleTestDoc.remove (err) ->
+      assert.equal err, null
+      done()
+
+  it 'should find with .findCrypted', (done) ->
+    BasicEncryptedModel.findCrypted({
+      findableInt: 1337,
+      findableText: 'Magazine from tagazine'
+    }).exec (err, docs) ->
+      return done(err) if err
+      assert.lengthOf docs, 1
+      done(null)
+
+  it 'should find with .encriptCondition', (done) ->
+    BasicEncryptedModel.find(
+      BasicEncryptedModel.encriptCondition({
+        findableInt: 1337
+        findableText: 'Magazine from tagazine'
+    })).exec (err, docs) ->
+      return done(err) if err
+      assert.lengthOf docs, 1
+      done(null)
+
+# describe 'document.save()', ->
+#   before ->
+#     sinon.spy BasicEncryptedModel.prototype, 'encrypt'
+#     sinon.spy BasicEncryptedModel.prototype, 'decryptSync'
+
+#   beforeEach (done) ->
+#     BasicEncryptedModel.prototype.encrypt.reset()
+#     BasicEncryptedModel.prototype.decryptSync.reset()
+
+#     @simpleTestDoc2 = new BasicEncryptedModel
+#       findableText: 'Magazine from tagazine'
+#       findableInt: 1337
+
+#       text: 'Unencrypted text'
+#       bool: true
+#       num: 42
+#       date: new Date '2014-05-19T16:39:07.536Z'
+#       id2: '5303e65d34e1e80d7a7ce212'
+#       arr: ['alpha', 'bravo']
+#       mix: { str: 'A string', bool: false }
+#       buf: new Buffer 'abcdefg'
+
+#     @simpleTestDoc2.save (err) ->
+#       assert.equal err, null
+#       done()
 
   # afterEach (done) ->
   #   @simpleTestDoc2.remove (err) ->
   #     assert.equal err, null
   #     done()
 
-  it 'saves encrypted fields', (done) ->
-    BasicEncryptedModel.find().where(
-      _id: @simpleTestDoc2._id
-      _ct: $exists: true
-      # _co: $exists: true
-      findableText: $exists: false
-      findableInt: $exists: false
-      text: $exists: false
-      bool: $exists: false
-      num: $exists: false
-      date: $exists: false
-      id2: $exists: false
-      arr: $exists: false
-      mix: $exists: false
-      buf: $exists: false
-    ).exec (err, docs) ->
-      assert.lengthOf docs, 1
-      done err
+  # it 'saves encrypted fields', (done) ->
+  #   BasicEncryptedModel.find().where(
+  #     _id: @simpleTestDoc2._id
+  #     _ct: $exists: true
+  #     _co: $exists: true
+  #     findableText: $exists: false
+  #     findableInt: $exists: false
+  #     text: $exists: false
+  #     bool: $exists: false
+  #     num: $exists: false
+  #     date: $exists: false
+  #     id2: $exists: false
+  #     arr: $exists: false
+  #     mix: $exists: false
+  #     buf: $exists: false
+  #   ).exec (err, docs) ->
+  #     assert.lengthOf docs, 1
+  #     done err
 
   # it 'returns decrypted data after save', (done) ->
   #   @simpleTestDoc2.save (err, doc) ->
